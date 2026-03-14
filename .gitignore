@@ -1,0 +1,13 @@
+# Ignore everything by default.
+*
+
+# Keep directory traversal enabled so allowed files can be tracked anywhere.
+!*/
+
+# Keep this file.
+!.gitignore
+
+# Allow source and markdown files.
+!*.c
+!*.h
+!*.md
