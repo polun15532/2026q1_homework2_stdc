@@ -51,13 +51,50 @@ IEEE 754-1985 §4.1 Round to Nearest：
 >if the two nearest representable values are equally near, the one with its least significant bit zero shall be delivered.
 
 假設一個數字無法被浮點數精確表示，預設規則會先選擇最接近的可表示值，這是為了避免固定向上或向下捨入造成單向誤差。當兩個可表示值同樣接近時，才進一步選擇最低有效位元為 $0$ 的那一個。
-[IEEE Standard 754 for Binary Floating-Point Arithmetic](https://people.eecs.berkeley.edu/~wkahan/ieee754status/IEEE754.PDF) 指出：
->Half-way cases are rounded to Nearest Even, which means that the neighbor with last digit 0 is chosen.
->Besides its lack of statistical bias, this choice has a subtle advantage; it prevents prolonged drift during slowly convergent iterations containing steps like these$
->While(...) do { y:=x+z; ...; x:=y-z}
+至於平手時最低有效位為什麼選擇 $0$ 而非 $1$，Nicholas J. Higham 在《Accuracy and Stability of Numerical Algorithms》第 2 章（p.54）給出答案：
+>For bases 2 and 10 rounding to even is preferred to rounding to odd. After rounding to even a subsequent rounding to one less place does not involve a tie.
 
-至於平手時最低有效位為什麼選擇 $0$ 而非 $1$，我目前沒有答案。
-選 $0$ 是否代表在某些統計上 $0$ 比較穩定較不容易 drift？
+選擇 rounding to even 時當精度在縮掉一位，不會再次遇到平手，Higham 給了以下例子：
+```
+rounding to even:
+2.445 -> 2.44 -> 2.4
+
+rounding to odd:
+2.445 -> 2.45 -> 2.5
+```
+可觀查到在這個例子中，平手時向 even 捨入遇到 1 次平手，向 odd 捨入則遇到兩次。
+
+3.在 scheduler 中，多個負載相關數值 `weight`、`load`、`load_avg`、`util_avg`、`capacity` 等，使用不同 fixed-point 精度。這使得運算時容易出現錯誤或 overflow。這一點在 commit `6ecdd74962f2` (sched/fair: Generalize the load/util averages resolution definition) 中直接被指出：
+>weight, load, load_avg, util_avg, freq, and capacity may have different fixed point ranges, which makes their update and usage error-prone.
+
+表面上看，統一尺度確實可避免不同單位混用所帶來的錯誤。然而，在 scheduler 的設計中，這並不是理想的解法。原因在於，一旦統一尺度，就必須同時決定一個共同的解析度與可表示範圍，而 scheduler 的數值運算必須在精度、overflow 風險與計算成本之間取得平衡。
+
+這種取捨可以從 kernel/sched/sched.h 的註解中看出：
+```
+/*
+ * Increase resolution of nice-level calculations for 64-bit architectures.
+ * The extra resolution improves shares distribution and load balancing of
+ * low-weight task groups (eg. nice +19 on an autogroup), deeper task-group
+ * hierarchies, especially on larger systems. This is not a user-visible change
+ * and does not change the user-interface for setting shares/weights.
+ *
+ * We increase resolution only if we have enough bits to allow this increased
+ * resolution (i.e. 64-bit). The costs for increasing resolution when 32-bit
+ * are pretty high and the returns do not justify the increased costs.
+ *
+ * Really only required when CONFIG_FAIR_GROUP_SCHED=y is also set, but to
+ * increase coverage and consistency always enable it on 64-bit platforms.
+ */
+```
+提高數值解析度可以改善 shares distribution 與 load balancing，但同時也需要更多位元與運算成本，因此僅在 64 位元架構上提高解析度，而 32 位元架構則維持較低解析度。因此 scheduler 的數值表示並不是單純追求統一，而是需要在解析度與實際成本之間取得平衡。
+在這種設計背景下，scheduler 內部不同指標就可能帶有不同的尺度。當這些具有不同尺度的數值被混合運算時，就容易出現 `6ecdd74962f2` 所指出的問題。
+因此，該 commit 的做法並不是強制所有指標採用相同的表式方法，而是建立共同的 fixed-point 標準，並透過 `scale_load` 與 `scale_load_down` 在不同尺度之間進行轉換，使不同來源的數值在跨指標運算前能夠先被正規化，從而降低更新與使用時出錯的風險。
+
+不同尺度造成的問題在 scheduler 的實作中曾經發生過。例如 `ea1dc6fc6242` (sched/fair: Fix calc_cfs_shares() fixed point arithmetics width confusion) 指出在提高 load resolution 後，scheduler 中兩個參與計算的變數使用了不同單位：
+>after which tg->load_avg and cfs_rq->load.weight had different units (10 bit fixed point and 20 bit fixed point resp.)
+
+為了解決這個單位不一致的問題，該 commit 在相關運算中加入轉換機制：
+>Add a comment to explain the use of cfs_rq->load.weight over the 'natural' cfs_rq->avg.load_avg and add scale_load_down() to correct for the difference in unit.
 
 - [ ] 針對 balanced ternary 和 radix economy
     * 電腦科學家 Donald E. Knuth 在《The Art of Computer Programming》第 2 卷說 "Perhaps the prettiest number system of all is the balanced ternary notation"，其背景考量是什麼？Knuth 是否有對應的著作進一步探討？
@@ -77,6 +114,5 @@ IEEE 754-1985 §4.1 Round to Nearest：
 
 
 ## Reference
-[IEEE Standard for Binary Floating-Point
-Arithmetic](https://www.ime.unicamp.br/~biloti/download/ieee_754-1985.pdf)
-[IEEE Standard 754 for Binary Floating-Point Arithmetic](https://people.eecs.berkeley.edu/~wkahan/ieee754status/IEEE754.PDF)
+1. IEEE Standards Board, *IEEE Standard for Binary Floating-Point Arithmetic*, ANSI/IEEE Std 754-1985, 1985. Available: [PDF](https://www.ime.unicamp.br/~biloti/download/ieee_754-1985.pdf)
+2. N. J. Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed. Philadelphia, PA: SIAM, 2002.
