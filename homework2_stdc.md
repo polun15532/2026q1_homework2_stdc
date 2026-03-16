@@ -100,19 +100,88 @@ rounding to odd:
     * 電腦科學家 Donald E. Knuth 在《The Art of Computer Programming》第 2 卷說 "Perhaps the prettiest number system of all is the balanced ternary notation"，其背景考量是什麼？Knuth 是否有對應的著作進一步探討？
     * 為何 balanced ternary 中求負數只需「符號反轉」？與二補數 (two's complement) 表示法相比，分析計算成本、硬體實作，和數值對稱性。建立數學模型並討論
     * 說明為什麼低位元量化 (例如 ternary / 1-bit LLM) 在 AI 硬體中具有潛在優勢。參照提及的論文，描述其關鍵考量 $\to$ 歡迎協作 [BitMamba.c](https://github.com/jserv/bitmamba.c)
+
 - [ ]  算術運算可完全以數位邏輯實作，分析 $x + y = (x \oplus y) + ((x \& y) << 1)$ 並回答：
     * 參閱數位邏輯教科書 (善用圖書館資源)，在硬體加法器中 `x ^ y` 和 `x & y` 各代表什麼訊號？並摘錄書中對應的描述，探討其應用場景
     * 為何 `(x+y)/2` 可能造成 overflow？又為何 $(x \& y) + ((x \oplus y) >> 1)$ 可避免 overflow
     * 在 Linux 核心中，為何這類 bit-level reasoning 對於效能與正確性非常重要？在 git log 找出對應的改進和修正
+
 - [ ]  `x & (x - 1)` 可用來檢測什麼數值性質？給出數學推導，說明為何此技巧成立。Linux 核心中有哪些場景會利用 power-of-two (2 的冪，[不是「冪次」](https://hackmd.io/@sysprog/it-vocabulary)) 性質？為何 power-of-two 對於系統效能特別重要？
+
+運算式 `x & (x-1)` 可用來消除最低位的 $1$，也可用來檢測整數 $x$ 是否為 $2$ 的冪。設 $x>0$，令 $k$ 為 $x$ 的最低位 $1$ 所在位置，則 $x$ 可表示為
+
+$$x = m \cdot 2^{k+1} + 2^k \quad (m \ge 0,\; k \ge 0)$$
+
+其中 $2^k$ 對應最低位的 $1$，而其右側有 $k$ 個 $0$。當 $x$ 減去 $1$ 時，該位會變為 $0$，而其右側的 $0$ 會全部變為 $1$，因此
+
+$$x-1 = m \cdot 2^{k+1} + (2^k - 1)$$
+
+因此在二進位表示下，運算 $x \& (x-1)$ 會清除 $x$ 的最低位 $1$。當 $m=0$ 時，
+
+$$x \& (x-1)=0$$
+
+故可利用此條件判斷 $x$ 是否為 $2$ 的冪。
+
+power-of-two 的性質可將昂貴的算術運算轉換為位元運算。當 $N=2^k$ 時，整數 $x$ 的最低 $k$ 個 bit 即對應於 $x$ 除以 $2^k$ 的餘數，因此
+
+$$x \bmod 2^k = x \& (2^k-1)$$
+
+同理，除以 $2^k$ 等價於將二進位表示右移 $k$ 位：
+
+$$x / 2^k = x >> k \quad x \ge 0$$
+
+在許多需要除法或模運算的操作，可以改為位元運算來降低計算成本。
+Linux kernel 在 `include/linux/log2.h` 中提供函式 `is_power_of_2`，用於判斷整數是否為 $2^k$：
+```
+static __always_inline __attribute__((const))
+bool is_power_of_2(unsigned long n)
+{
+	return n - 1 < (n ^ (n - 1));
+}
+```
+這個寫法雖然不同於常見的 `(n & (n-1)) == 0`，但判斷的仍是同一個數值性質。  
+`n-1` 的作用在於：對任意整數減 $1$ 時，會翻轉其最低位的 `1` 以及其右側所有 bit。若 $n = 2^k$，則
+
+$$n \oplus (n-1) = 2^{k+1}-1$$
+
+因此
+
+$$n-1 = 2^k-1 < 2^{k+1}-1 = n \oplus (n-1)$$
+
+此性質在 $k=0$ 時亦成立。當 $n=1$ 時：
+
+$$1-1 = 0 < 1\oplus0 = 1$$
+
+反之，若 $n>0$ 且 $n$ 不是 $2^k$，則其二進位中至少包含兩個 `1`。做 $\oplus $ 時高位的 `1` 會被消去，使得xxx
+
+從 commit `4cc67b048459`(linux/log2.h: reduce instruction count for is_power_of_2()) 中也可看出這個 helper 的改寫也有效能上的考量。
+```
+    Follow an observation that (n ^ (n - 1)) will only ever retain the most
+    significant bit set in the word operated on if that is the only bit set in
+    the first place, and use it to determine whether a number is a whole power
+    of 2, avoiding the need for an explicit check for nonzero.
+    
+    This reduces the sequence produced to 3 instructions only across Alpha,
+    MIPS, and RISC-V targets, down from 4, 5, and 4 respectively, removing a
+    branch in the two latter cases.  And it's 5 instructions on POWER and
+    x86-64 vs 8 and 9 respectively.  There are no branches now emitted here
+    for targets that have a suitable conditional set operation, although an
+    inline expansion will often end with one, depending on what code a call to
+    this function is used in.
+```
+透過對 $n \oplus (n-1)$ 的觀察，可以直接判斷整數是否為 $2$ 的冪，避免額外的非零檢查，同時移除分支判斷。
+
+
 - [ ] `((X) - 0x01010101) & ~(X) & 0x80808080` 技巧可用於 `strlen()` 的實作，回答：
     * 該巨集偵測的是什麼資料？為何該運算可一次檢測 4 個位元組？為何這比逐 byte 檢查更有效率？
     * 在 Linux 核心原始程式碼中找出類似 word-at-a-time 手法的案例，並充分進行效能分析
+
+
 - [ ]  教材提及若干真實案例，以 Boeing 787 的[軟體缺失案例](https://hackmd.io/@sysprog/software-failure)來說，為何 32 位元計數器在約 248 天會 overflow？參照 FAA (Federal Aviation Administration ) 和相關官方事故分析報告進行探討
     * 在 Linux 核心的 git log 找出類似的 integer overflow 案例並探討
     * 在 C 語言規格書列舉相關整數範圍的規範和實作考量
 
 
 ## Reference
-1. IEEE Standards Board, *IEEE Standard for Binary Floating-Point Arithmetic*, ANSI/IEEE Std 754-1985, 1985. Available: [PDF](https://www.ime.unicamp.br/~biloti/download/ieee_754-1985.pdf)
+1. IEEE Standards Board, *IEEE Standard for Binary Floating-Point Arithmetic*, ANSI/IEEE Std 754-1985, 1985. Available: [PDF](https://ieeemilestones.ethw.org/File%3AIeee754-1985.pdf)
 2. N. J. Higham, *Accuracy and Stability of Numerical Algorithms*, 2nd ed. Philadelphia, PA: SIAM, 2002.
