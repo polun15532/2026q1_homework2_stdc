@@ -176,6 +176,102 @@ $$1-1 = 0 < 1\oplus0 = 1$$
     * 該巨集偵測的是什麼資料？為何該運算可一次檢測 4 個位元組？為何這比逐 byte 檢查更有效率？
     * 在 Linux 核心原始程式碼中找出類似 word-at-a-time 手法的案例，並充分進行效能分析
 
+1. 此巨集用於檢測一個 32 位元變數中，是否存在某個位元組等於 $0x00$。  
+依據教材的引導，可先單一位元組的情況。令 $b$ 為一個 8-bit 整數，考慮：
+
+$$(b - 1) \& \sim b \& 0x80$$
+
+其中常數 $0x80$ 提示我們只須關心最高位 (bit 7)。問題可轉換為，$(b-1)$ 的 bit 7 與 $\sim b$ 的 bit 7 在什麼狀況下同時為 1？
+
+若 $\sim b$ 的 bit 7 為 1，表示 $b$ 的 bit 7 原本為 0，因此：
+
+$$\sim b \text{ 的 bit 7 為 1} \iff b < 0x80$$
+
+若 $(b-1)$ 的 bit 7 為 1，表示減 1 後最高位為 1。對 8-bit 整數而言，滿足此條件的情況為：
+
+$$b = 0x00 \quad \text{或} \quad b \ge 0x81$$
+
+而滿足這兩個條件的交集為：
+
+$$(b < 0x80) \cap (b = 0x00 \text{ 或 } b \ge 0x81) = \{0x00\}$$
+
+可以得到：
+
+$$(b - 1) \& \sim b \& 0x80 \neq 0 \iff b = 0x00$$
+
+因此，將此判斷套用到 32 位元變數的後，只要其中任一 byte 等於 $0x00$，則
+
+$$((X) - 0x01010101) \& \sim(X) \& 0x80808080 > 0x0$$
+
+2. 在 `arch/x86/include/asm/word-at-a-time.h` 中，有與題目相同的判斷：
+
+```c
+struct word_at_a_time {
+	const unsigned long one_bits, high_bits;
+};
+
+#define WORD_AT_A_TIME_CONSTANTS { REPEAT_BYTE(0x01), REPEAT_BYTE(0x80) }
+
+/* Return nonzero if it has a zero */
+static inline unsigned long has_zero(unsigned long a, unsigned long *bits,
+				     const struct word_at_a_time *c)
+{
+	unsigned long mask = ((a - c->one_bits) & ~a) & c->high_bits;
+	*bits = mask;
+	return mask;
+}
+```
+段程式碼的邏輯與題目中的巨集完全相同，只是將 `0x01010101` 與 `0x80808080` 抽象成 `REPEAT_BYTE(0x01)` 與 `REPEAT_BYTE(0x80)`，使同一套判斷可直接套用到 unsigned long。因此在 32 位元架構可一次檢查 4 位元組，在 64 位元架構可一次檢查 8 個 byte。
+
+若想進一步知道第 1 個滿足條件的位元組位置，x86 版本還提供：
+
+```c
+#define find_zero(bits) (__ffs(bits) >> 3)
+```
+由於函式 `has_zero` 產生的 mask 只會在 bit 7、15、23、... 位置設為 1，因此使用 `__ffs(bits)` 找出最低的 set bit，再右移 3 位，即可轉成對應的 byte index。
+另外這個方法依賴 little-endian 下 byte 與低位 bit 的表示關係，不可直接套用到 big-endian。對於 big-endian 在 `include/asm-generic/word-at-a-time.h` 有提供不同的 `find_zero` 實作。
+```c
+static inline long find_zero(unsigned long mask)
+{
+	long byte = 0;
+#ifdef CONFIG_64BIT
+	if (mask >> 32)
+		mask >>= 32;
+	else
+		byte = 4;
+#endif
+	if (mask >> 16)
+		mask >>= 16;
+	else
+		byte += 2;
+	return (mask >> 8) ? byte : byte + 1;
+}
+```
+在 big-endian 的實作中，則依據位元組順序逐步縮小範圍，判斷第一個 zero byte 的位置。
+
+3. 為了驗證 word-at-a-time 的效果，設計一個 strlen benchmark。程式會根據輸入參數 length 建立一條長度為 length 的字串，內容全部填入 'A'，並在最後補上一個 '\0'。接著分別量測兩種 strlen 實作：
+
+`single_byte_strlen`：逐 byte 掃描，逐一判斷 s[i] == '\0'
+`four_byte_strlen`：先處理起始位址未對齊的前綴區段，之後改為每次檢查 4 bytes，並利用
+  $$((x - 0x01010101) & ~x & 0x80808080)$$
+  判斷其中是否存在 `0x00`
+
+為避免編譯器將 single_byte_strlen 優化為 libc 的 strlen 而影響結果，編譯時加入 -fno-optimize-strlen 與 -fno-builtin 等選項。記憶體透過 posix_memalign(..., 64, ...) 配置，使量測主要反映對齊存取下的效能表現，同時程式透過 `clock_gettime` 取得執行前與執行後的時間。
+以下為量測結果：
+
+| 長度 | single_byte ns/call | four_byte ns/call | single_byte ns/byte | four_byte ns/byte |
+| --- | ---: | ---: | ---: | ---: |
+| 64 B | 110.37 | 55.82 | 1.7245 | 0.8722 |
+| 256 B | 253.95 | 113.84 | 0.9920 | 0.4447 |
+| 1 KiB | 983.90 | 309.40 | 0.9608 | 0.3021 |
+| 4 KiB | 3611.63 | 973.55 | 0.8817 | 0.2377 |
+| 64 KiB | 65234.17 | 15168.37 | 0.9954 | 0.2315 |
+| 1 MiB | 1209283.11 | 305303.62 | 1.1533 | 0.2912 |
+| 16 MiB | 24303767.00 | 6971473.75 | 1.4486 | 0.4155 |
+
+由這組量測可見，`four_byte_strlen` 的執行時間低於 `single_byte_strlen`。
+
+
 
 - [ ]  教材提及若干真實案例，以 Boeing 787 的[軟體缺失案例](https://hackmd.io/@sysprog/software-failure)來說，為何 32 位元計數器在約 248 天會 overflow？參照 FAA (Federal Aviation Administration ) 和相關官方事故分析報告進行探討
     * 在 Linux 核心的 git log 找出類似的 integer overflow 案例並探討
