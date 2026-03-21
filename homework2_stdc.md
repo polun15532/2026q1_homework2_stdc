@@ -64,7 +64,7 @@ rounding to odd:
 ```
 可觀查到在這個例子中，平手時向 even 捨入遇到 1 次平手，向 odd 捨入則遇到兩次。
 
-3.在 scheduler 中，多個負載相關數值 `weight`、`load`、`load_avg`、`util_avg`、`capacity` 等，使用不同 fixed-point 精度。這使得運算時容易出現錯誤或 overflow。這一點在 commit `6ecdd74962f2` (sched/fair: Generalize the load/util averages resolution definition) 中直接被指出：
+3.在 scheduler 中，多個負載相關數值 `weight`、`load`、`load_avg`、`util_avg`、`capacity` 等，使用不同 fixed-point 精度。這使得運算時容易出現錯誤或 overflow。這一點在 commit [6ecdd74962f2](https://github.com/torvalds/linux/commit/6ecdd74962f2) (sched/fair: Generalize the load/util averages resolution definition) 中直接被指出：
 >weight, load, load_avg, util_avg, freq, and capacity may have different fixed point ranges, which makes their update and usage error-prone.
 
 表面上看，統一尺度確實可避免不同單位混用所帶來的錯誤。然而，在 scheduler 的設計中，這並不是理想的解法。原因在於，一旦統一尺度，就必須同時決定一個共同的解析度與可表示範圍，而 scheduler 的數值運算必須在精度、overflow 風險與計算成本之間取得平衡。
@@ -87,10 +87,10 @@ rounding to odd:
  */
 ```
 提高數值解析度可以改善 shares distribution 與 load balancing，但同時也需要更多位元與運算成本，因此僅在 64 位元架構上提高解析度，而 32 位元架構則維持較低解析度。因此 scheduler 的數值表示並不是單純追求統一，而是需要在解析度與實際成本之間取得平衡。
-在這種設計背景下，scheduler 內部不同指標就可能帶有不同的尺度。當這些具有不同尺度的數值被混合運算時，就容易出現 `6ecdd74962f2` 所指出的問題。
+在這種設計背景下，scheduler 內部不同指標就可能帶有不同的尺度。當這些具有不同尺度的數值被混合運算時，就容易出現 [6ecdd74962f2](https://github.com/torvalds/linux/commit/6ecdd74962f2) 所指出的問題。
 因此，該 commit 的做法並不是強制所有指標採用相同的表式方法，而是建立共同的 fixed-point 標準，並透過 `scale_load` 與 `scale_load_down` 在不同尺度之間進行轉換，使不同來源的數值在跨指標運算前能夠先被正規化，從而降低更新與使用時出錯的風險。
 
-不同尺度造成的問題在 scheduler 的實作中曾經發生過。例如 `ea1dc6fc6242` (sched/fair: Fix calc_cfs_shares() fixed point arithmetics width confusion) 指出在提高 load resolution 後，scheduler 中兩個參與計算的變數使用了不同單位：
+不同尺度造成的問題在 scheduler 的實作中曾經發生過。例如 [ea1dc6fc6242](https://github.com/torvalds/linux/commit/ea1dc6fc6242) (sched/fair: Fix calc_cfs_shares() fixed point arithmetics width confusion) 指出在提高 load resolution 後，scheduler 中兩個參與計算的變數使用了不同單位：
 >after which tg->load_avg and cfs_rq->load.weight had different units (10 bit fixed point and 20 bit fixed point resp.)
 
 為了解決這個單位不一致的問題，該 commit 在相關運算中加入轉換機制：
@@ -154,7 +154,7 @@ $$1-1 = 0 < 1\oplus0 = 1$$
 
 反之，若 $n>0$ 且 $n$ 不是 $2^k$，則其二進位中至少包含兩個 `1`。做 $\oplus $ 時高位的 `1` 會被消去，使得xxx
 
-從 commit `4cc67b048459`(linux/log2.h: reduce instruction count for is_power_of_2()) 中也可看出這個 helper 的改寫也有效能上的考量。
+從 commit [4cc67b048459](https://github.com/torvalds/linux/commit/4cc67b048459) (linux/log2.h: reduce instruction count for is_power_of_2()) 中也可看出這個 helper 的改寫也有效能上的考量。
 ```
     Follow an observation that (n ^ (n - 1)) will only ever retain the most
     significant bit set in the word operated on if that is the only bit set in
@@ -251,10 +251,10 @@ static inline long find_zero(unsigned long mask)
 
 3. 為了驗證 word-at-a-time 的效果，設計一個 strlen benchmark。程式會根據輸入參數 length 建立一條長度為 length 的字串，內容全部填入 'A'，並在最後補上一個 '\0'。接著分別量測兩種 strlen 實作：
 
-`single_byte_strlen`：逐 byte 掃描，逐一判斷 s[i] == '\0'
+`single_byte_strlen`：逐 byte 掃描，逐一判斷 `s[i] == '\0'`
 `four_byte_strlen`：先處理起始位址未對齊的前綴區段，之後改為每次檢查 4 bytes，並利用
-  $$((x - 0x01010101) & ~x & 0x80808080)$$
-  判斷其中是否存在 `0x00`
+$$((x) - 0x01010101) \& \sim(x) \& 0x80808080$$
+判斷其中是否存在 `0x00`
 
 為避免編譯器將 single_byte_strlen 優化為 libc 的 strlen 而影響結果，編譯時加入 -fno-optimize-strlen 與 -fno-builtin 等選項。記憶體透過 posix_memalign(..., 64, ...) 配置，使量測主要反映對齊存取下的效能表現，同時程式透過 `clock_gettime` 取得執行前與執行後的時間。
 以下為量測結果：
@@ -277,6 +277,87 @@ static inline long find_zero(unsigned long mask)
     * 在 Linux 核心的 git log 找出類似的 integer overflow 案例並探討
     * 在 C 語言規格書列舉相關整數範圍的規範和實作考量
 
+## 回顧期初測驗
+- [ ] 對「Linux 核心設計」[第 3 週測驗題](https://hackmd.io/@sysprog/linux2026-quiz3)，挑出至少 3 個題目群組，應當涵蓋 CPU 排程、資訊安全，還有電腦網路議題。除了給定的題目 (及延伸問題)，你該依據自身的理解，提出問題並充分討論。
+
+- [ ] C99 6.3.2.1 §3 列出三種不觸發 array decay 的例外情境。在 Linux 核心原始程式碼中 (及 git log)，找出至少二處利用 `sizeof` 作用於整個陣列 (而非 decay 後的指標) 來計>算陣列長度的巨集或函式，並說明為何核心偏好 `ARRAY_SIZE(arr)` 而非手動 `sizeof(arr)/sizeof(arr[0])`。搭配 git log 舉出因錯誤使用 `sizeof` 導致 bug 的案例
+
+在 `include/linux/array_size.h` 中定義：
+```
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]) + __must_be_array(arr))
+```
+`__must_be_array` 會在編譯期檢查 `arr` 是否為陣列，若是，則等價於  
+`sizeof(arr) / sizeof((arr)[0]) + 0`；若否則在編譯期報錯。
+
+在 `include/linux/compiler.h` 中：
+
+```
+#define __BUILD_BUG_ON_ZERO_MSG(e, msg, ...) ((int)sizeof(struct {_Static_assert(!(e), msg);}))
+
+#define __same_type(a, b) __builtin_types_compatible_p(typeof(a), typeof(b))
+
+#define __is_array(a) (!__same_type((a), &(a)[0]))
+
+#define __must_be_array(a) __BUILD_BUG_ON_ZERO_MSG(!__is_array(a), "must be array")
+```
+`__is_array(a)` 透過比較 `(a)` 與 `&(a)[0]` 的型別來判斷。由於 `&(a)[0]` 一定是 pointer type，若 `(a)` 也是 pointer type 則 `a` 為指標，否則為陣列。
+在巨集 `__BUILD_BUG_ON_ZERO_MSG` 中，`_Static_assert` 負責於編譯期檢查條件。`_Static_assert` 本身沒有值，這裡利用 C11 將其作為 declaration 放入 `struct { ... }` 中，再利用 GNU C 對 empty struct 的擴展，使 `sizeof(struct { _Static_assert(...); })` 在條件成立時成為合法的常數表達式，在條件不成立時則直接編譯失敗。
+在 C11 中，_Static_assert 屬於 declaration。其語法在 C11 6.7 Declarations 中被納入 static_assert-declaration，並於 6.7.10 Static assertions 定義如下：
+>static_assert-declaration: _Static_assert ( constant-expression , string-literal ) ;
+
+_Static_assert 在 C11 語法中被歸類為 declaration，其效果為當 `constant-expression` 為 0 產生 `constraint violation`。
+
+在 C11 6.7.2.1 Structure and union specifiers 的語法中，明確允許 `static_assert-declaration` 出現在 `struct` 的成員宣告中：
+>struct-or-union-specifier:
+>　　struct-or-union identifieropt { struct-declaration-list }
+>　　struct-or-union identifier
+>struct-declaration:
+>　　specifier-qualifier-list struct-declarator-listopt ;
+>　　static_assert-declaration
+
+由此可得，`_Static_assert` ; 作為一種 declaration，可以合法地出現在 struct-declaration-list 中。故下列宣告在語法上是成立的：
+```
+struct {
+    _Static_assert(const_expr, "msg");
+}
+```
+然而 C11 6.7.2.1 §8 也明確指出：
+>If the struct-declaration-list contains no named members, no anonymous structures, and no anonymous unions, the behavior is undefined.
+
+因此從 C11 的角度來看，這個結構體屬於沒有 named members 的情況為未定義行為。
+__BUILD_BUG_ON_ZERO_MSG 的語意則依賴 GNU C 的語言擴展 [Empty-Structures](https://gcc.gnu.org/onlinedocs/gcc-13.3.0/gcc/Empty-Structures.html)，文件指出：
+>GCC permits a C structure to have no members. The structure has size zero.
+
+因此在 GNU C 語意下上述結構體會被接受，且大小被定義為 $0$，從而滿足 `__must_be_array(arr)` 當 arr 為陣列時，此巨集會被替換為 0。
+在文件 `Documentation/dev-tools/checkpatch.rst` 中亦有說明：
+> The ARRAY_SIZE(foo) macro should be preferred over
+> sizeof(foo)/sizeof(foo[0]) for finding number of elements in an
+> array.
+
+若以 ARRAY_SIZE 為關鍵字檢視查找 git log 可看到：
+[e809085f](https://github.com/torvalds/linux/commit/e809085f)
+>The IPv4 memcpy operations used ARRAY_SIZE(tcf.dst_ip) and ARRAY_SIZE
+(tcf.src_ip), Update these to use sizeof(cfilter->ip.v4.dst_ip) and
+sizeof(cfilter->ip.v4.src_ip) to ensure correct and explicit copy size.
+
+以及 commit [3d9c9e1da](https://github.com/torvalds/linux/commit/3d9c9e1da) (powerpc/xmon: replace sizeof calculations with ARRAY_SIZE macro) 也提到：
+>This patch replaces the sizeof calculations with the macro to make the
+code cleaner and more immediately obvious what it is doing. 
+
+這些 commit 都明確表達當目標為陣列時將透過 `ARRAY_SIZE` 代替 `sizeof` 以避免輸入不是陣列所帶來的誤用風險。
+另外 linux 也有因錯誤使用 sizeof 而導致 bug 的案例，例如在 commit [c3914ce1963](https://github.com/torvalds/linux/commit/c3914ce1963) 提及：
+>sizeof(num) evaluates to sizeof(size_t) which is 8 bytes on 64-bit,
+but the buffer elements are only 4 bytes.
+
+原本以 `sizeof(num)` 計算 buffer 大小，但 `sizeof(num)` 取得的是計數變數的型別大小`size_t`，而非元素大小，故修正為 `sizeof(*meas)`。
+
+* `container_of` 從 v2.6 的樸素指標減法演化至 v6.2 的 `container_of_const`。從 C 語言規格書 (C99 6.5.2.3、C11 6.5.1.1) 的角度，逐步說明各演進階段倚賴的語言特性 (statement expression、`_Static_assert`、`_Generic`)，並分析哪些屬於 ISO C 標準、哪些屬於 GNU extension。設計實驗驗證在 `-std=c11 -pedantic` 下，哪些版本無法通過編譯
+* C99 6.5 §7 的 strict aliasing rule 列舉了合法的存取型別。Linux 核心以 `-fno-strict-aliasing` 全域停用此規則。回答以下:
+    * 在 Linux 核心的 git log 找出因啟用 strict aliasing 而導致編譯器錯誤最佳化的具體案例，說明哪段程式碼被錯誤重排
+    * 若未來 Linux 核心嘗試移除 `-fno-strict-aliasing`，`container_of`、`hlist` 的 `pprev` 間接指標、BPF JIT 等子系統需要做哪些修改？以 C11 的 `memcpy` 型別轉換或 C23 提案為基礎，提出可行的遷移策略
+* `ptrdiff_t` 在 32-bit 架構下可能無法表示超過 2 GiB 的指標差值。分析 glibc 如何在 `malloc` 中以 `PTRDIFF_MAX` 作為物件大小上限，並在 Linux 核心的 git log 找出類似的防護措施。教材提及 CVE-2019-7309 涉及 `memcmp` 在超過 `SSIZE_MAX` 大小的物件上使用帶號比較指令。分析該漏洞的根本成因 (提示：x32 ABI 下 `RDX` 暫存器高位元未清零)，並說明此問題為何僅影響特定 ABI 而非所有 32-bit 架構。設計測試程式展示 `ptrdiff_t` 溢位在一般 32-bit 環境下的未定義行為
+* 教材提及 `((type *)0)->member` 不解參考空指標，僅作為 lvalue 使用。從 C99 6.5.2.3 §4 和 6.3.2.1 §1 的角度，嚴格論證此運算式為何合法。在 C11 和 C23 規格中，此技巧的合法性是否有變化？若有，說明對 `offsetof` 巨集實作的影響
+* `container_of` 的指標算術 `(char *)ptr - offsetof(type, member)` 依賴結構體記憶體佈局的連續性。給定結構體 `struct S { char a; int b; long c; struct list_head d; }` 在 LP64 平台，以 C99 6.7.2.1 的對齊規則，推導每個成員的 offset (考慮 padding)。建立通用公式：給定成員型別序列 $T_1, T_2, \ldots, T_n$ 及各自的 alignment requirement $a_i$，第 $k$ 個成員的 offset $o_k = \lceil o_{k-1} + \text{sizeof}(T_{k-1}) \rceil_{a_k}$ (上取整至 $a_k$ 的倍數)。以此公式驗證 `offsetof` 的正確性，並分析 `__attribute__((packed))` 如何改變此公式
 
 ## Reference
 1. IEEE Standards Board, *IEEE Standard for Binary Floating-Point Arithmetic*, ANSI/IEEE Std 754-1985, 1985. Available: [PDF](https://ieeemilestones.ethw.org/File%3AIeee754-1985.pdf)
