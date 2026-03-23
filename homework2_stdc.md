@@ -351,13 +351,123 @@ but the buffer elements are only 4 bytes.
 
 原本以 `sizeof(num)` 計算 buffer 大小，但 `sizeof(num)` 取得的是計數變數的型別大小`size_t`，而非元素大小，故修正為 `sizeof(*meas)`。
 
-* `container_of` 從 v2.6 的樸素指標減法演化至 v6.2 的 `container_of_const`。從 C 語言規格書 (C99 6.5.2.3、C11 6.5.1.1) 的角度，逐步說明各演進階段倚賴的語言特性 (statement expression、`_Static_assert`、`_Generic`)，並分析哪些屬於 ISO C 標準、哪些屬於 GNU extension。設計實驗驗證在 `-std=c11 -pedantic` 下，哪些版本無法通過編譯
+- [ ] `container_of` 從 v2.6 的樸素指標減法演化至 v6.2 的 `container_of_const`。從 C 語言規格書 (C99 6.5.2.3、C11 6.5.1.1) 的角度，逐步說明各演進階段倚賴的語言特性 (statement expression、`_Static_assert`、`_Generic`)，並分析哪些屬於 ISO C 標準、哪些屬於 GNU extension。設計實驗驗證在 `-std=c11 -pedantic` 下，哪些版本無法通過編譯
+
+早期 `container_of` 放置於 `include/linux/kernel.h` 以下為 [v2.6.30](https://raw.githubusercontent.com/torvalds/linux/v2.6.30/include/linux/kernel.h) 的實現:
+```
+#define container_of(ptr, type, member) ({			\
+	const typeof( ((type *)0)->member ) *__mptr = (ptr);	\
+	(type *)( (char *)__mptr - offsetof(type,member) );})
+```
+
+
+
 * C99 6.5 §7 的 strict aliasing rule 列舉了合法的存取型別。Linux 核心以 `-fno-strict-aliasing` 全域停用此規則。回答以下:
     * 在 Linux 核心的 git log 找出因啟用 strict aliasing 而導致編譯器錯誤最佳化的具體案例，說明哪段程式碼被錯誤重排
     * 若未來 Linux 核心嘗試移除 `-fno-strict-aliasing`，`container_of`、`hlist` 的 `pprev` 間接指標、BPF JIT 等子系統需要做哪些修改？以 C11 的 `memcpy` 型別轉換或 C23 提案為基礎，提出可行的遷移策略
-* `ptrdiff_t` 在 32-bit 架構下可能無法表示超過 2 GiB 的指標差值。分析 glibc 如何在 `malloc` 中以 `PTRDIFF_MAX` 作為物件大小上限，並在 Linux 核心的 git log 找出類似的防護措施。教材提及 CVE-2019-7309 涉及 `memcmp` 在超過 `SSIZE_MAX` 大小的物件上使用帶號比較指令。分析該漏洞的根本成因 (提示：x32 ABI 下 `RDX` 暫存器高位元未清零)，並說明此問題為何僅影響特定 ABI 而非所有 32-bit 架構。設計測試程式展示 `ptrdiff_t` 溢位在一般 32-bit 環境下的未定義行為
-* 教材提及 `((type *)0)->member` 不解參考空指標，僅作為 lvalue 使用。從 C99 6.5.2.3 §4 和 6.3.2.1 §1 的角度，嚴格論證此運算式為何合法。在 C11 和 C23 規格中，此技巧的合法性是否有變化？若有，說明對 `offsetof` 巨集實作的影響
-* `container_of` 的指標算術 `(char *)ptr - offsetof(type, member)` 依賴結構體記憶體佈局的連續性。給定結構體 `struct S { char a; int b; long c; struct list_head d; }` 在 LP64 平台，以 C99 6.7.2.1 的對齊規則，推導每個成員的 offset (考慮 padding)。建立通用公式：給定成員型別序列 $T_1, T_2, \ldots, T_n$ 及各自的 alignment requirement $a_i$，第 $k$ 個成員的 offset $o_k = \lceil o_{k-1} + \text{sizeof}(T_{k-1}) \rceil_{a_k}$ (上取整至 $a_k$ 的倍數)。以此公式驗證 `offsetof` 的正確性，並分析 `__attribute__((packed))` 如何改變此公式
+
+1. 在 commit [`5b188cc4866`](https://github.com/torvalds/linux/commit/5b188cc4866) (vKVM: selftests: Disable strict aliasing) 提供了 strict aliasing 導致編譯器錯誤最佳化的案例。
+以下為 commit 提供的程式碼與組合語言：
+```
+  printf("orig = %lx, next = %lx, want = %lu\n", pmcr_orig, pmcr, pmcr_n);
+  set_pmcr_n(&pmcr, pmcr_n);
+  printf("orig = %lx, next = %lx, want = %lu\n", pmcr_orig, pmcr, pmcr_n);
+
+ 0000000000401c90 <set_pmcr_n>:
+  401c90:       f9400002        ldr     x2, [x0]
+  401c94:       b3751022        bfi     x2, x1, #11, #5
+  401c98:       f9000002        str     x2, [x0] // 將更新後的值寫回 *pmcr
+  401c9c:       d65f03c0        ret
+
+ 0000000000402660 <test_create_vpmu_vm_with_pmcr_n>:
+  402724:       aa1403e3        mov     x3, x20
+  402728:       aa1503e2        mov     x2, x21
+  40272c:       aa1603e0        mov     x0, x22
+  402730:       aa1503e1        mov     x1, x21
+  402734:       940060ff        bl      41ab30 <_IO_printf>
+  402738:       aa1403e1        mov     x1, x20
+  40273c:       910183e0        add     x0, sp, #0x60
+  402740:       97fffd54        bl      401c90 <set_pmcr_n> 
+  402744:       aa1403e3        mov     x3, x20
+  402748:       aa1503e2        mov     x2, x21 <- 編譯器沒有重新載入 pmcr 而是使用暫存器上的值
+  40274c:       aa1503e1        mov     x1, x21
+  402750:       aa1603e0        mov     x0, x22
+  402754:       940060f7        bl      41ab30 <_IO_printf>
+```
+在 `set_pmcr_n` 中，可觀查到 `401c98: str x2, [x0]` 已將更新後的 pmcr 寫回記憶體，另外從 `40273c: add x0, sp, #0x60` 可知變數 pmcr 位於 `sp + 60` 處，然而在 `set_pmcr_n` 修改 `pmcr` 後，並沒有任何指令將 `pmcr` 重新仔入到暫存器 `x2`，而是使用 `402748: mov x2, x21` 讓 `printf` 使用舊的 `pmcr` 數值。
+
+2. 在 [`a339671`](https://github.com/torvalds/linux/commit/a339671) (vdso: Switch get/put_unaligned() from packed struct to memcpy()) 提及如何透過 `memcpy` 處理因 `type punning` 而違反 `strict aliasing` 的案例。
+```diff
+-#define __get_unaligned_t(type, ptr) ({							\
+-	const struct { type x; } __packed * __get_pptr = (typeof(__get_pptr))(ptr);	\
+-	__get_pptr->x;
+
++ #define __get_unaligned_t(type, ptr) ({					\
++	type *__get_unaligned_ctrl_type __always_unused = NULL;		\
++	__unqual_scalar_typeof(*__get_unaligned_ctrl_type) __get_unaligned_val; \
++	__builtin_memcpy(&__get_unaligned_val, (void *)(ptr),		\
++			 sizeof(__get_unaligned_val));			\
++	__get_unaligned_val;						\
++})
+```
+舊版 `get_unaligned` 將指標轉型為 `struct { type x; } __packed *`，再以 `__get_pptr->x` 讀取資料，這屬於 type punning (以其他型別解讀同一塊記憶體)，這違反了 strict aliasing。另外 `__packed` 同 `_attribute__((__packed__))` 用於提示編譯器成員
+`x` 可能不滿足對齊要求。
+新版則改為使用 `__builtin_memcpy` 將資料複製到變數 `__get_unaligned_val` 中再讀取資料，從而避開 type punning 導致的 strict aliasing。
+
+- [ ] `ptrdiff_t` 在 32-bit 架構下可能無法表示超過 2 GiB 的指標差值。分析 glibc 如何在 `malloc` 中以 `PTRDIFF_MAX` 作為物件大小上限，並在 Linux 核心的 git log 找出類似的防護措施。教材提及 CVE-2019-7309 涉及 `memcmp` 在超過 `SSIZE_MAX` 大小的物件上使用帶號比較指令。分析該漏洞的根本成因 (提示：x32 ABI 下 `RDX` 暫存器高位元未清零)，並說明此問題為何僅影響特定 ABI 而非所有 32-bit 架構。設計測試程式展示 `ptrdiff_t` 溢位在一般 32-bit 環境下的未定義行為
+
+- [ ] 教材提及 `((type *)0)->member` 不解參考空指標，僅作為 lvalue 使用。從 C99 6.5.2.3 §4 和 6.3.2.1 §1 的角度，嚴格論證此運算式為何合法。在 C11 和 C23 規格中，此技巧的合法性是否有變化？若有，說明對 `offsetof` 巨集實作的影響
+
+- [ ] `container_of` 的指標算術 `(char *)ptr - offsetof(type, member)` 依賴結構體記憶體佈局的連續性。給定結構體 `struct S { char a; int b; long c; struct list_head d; }` 在 LP64 平台，以 C99 6.7.2.1 的對齊規則，推導每個成員的 offset (考慮 padding)。建立通用公式：給定成員型別序列 $T_1, T_2, \ldots, T_n$ 及各自的 alignment requirement $a_i$，第 $k$ 個成員的 offset $o_k = \lceil o_{k-1} + \text{sizeof}(T_{k-1}) \rceil_{a_k}$ (上取整至 $a_k$ 的倍數)。以此公式驗證 `offsetof` 的正確性，並分析 `__attribute__((packed))` 如何改變此公式
+
+C99 6.7.2.1 對記憶體布局有提到以下幾點：
+
+結構體成員順序由宣告的順序決定
+>Within a structure object, the non-bit-field members and the units in which bit-fields reside have addresses that increase in the order in which they are declared.
+
+可以有 padding 但不是在開頭
+>There may be unnamed padding within a structure object, but not at its beginning.
+
+padding 可以放在結構體的尾端
+>There may be unnamed padding at the end of a structure or union.
+
+所有不是 bit-field 的成員都須滿足對齊，但對齊是實現定義
+>Each non-bit-field member of a structure or union object is aligned in an implementation-defined manner appropriate to its type.
+
+根據 C99 6.7.2.1，結構體成員依宣告順序配置，且每個成員需滿足對齊需求，並允許在成員之間插入未命名的 padding。另外在 x86_64 Linux 環境下，GCC 採用 [System V Application Binary Interface](https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf) 作為其資料配置依據。在該 ABI 文件的 Figure 3.1「Scalar Types」中，給出了基本型別的大小與對齊需求如下：
+
+| Type        | Size (bytes) | Alignment (bytes) |
+|------------|-------------|-------------------|
+| char       | 1           | 1                 |
+| int        | 4           | 4                 |
+| long       | 8           | 8                 |
+| pointer    | 8           | 8                 |
+
+因此 `struct S` 各成員的 offset 與對齊分別為：
+```
+struct S {
+    char a; // offset: 0 byte, alignment = 1 byte, padding = 3 byte (下個成員 4 對齊)
+    int  b; // offset: 4 byte, alignment = 4 byte, padding = 4 byte (下個成員 8 對齊)
+    long c; // offset: 8 byte, alignment = 8 byte, padding = 0 byte (下個成員 8 對齊)
+    struct list_head d; // offset: 16 byte, alignment = 8 byte, padding = 0 byte (結束地址 8 對齊)
+};
+```
+因為結構體開頭不可插入 padding。對於第 $k$ 個成員，其 offset 須由前一個成員的結束位置向上取整到 $a_k$ 的倍數得到
+$$
+o_k = \left\lceil \frac{o_{k-1} + \text{sizeof}(T_{k-1})}{a_k} \right\rceil a_k \qquad (k \ge 2)
+$$
+
+將此公式套用到本題，可得
+$$o_a = 0$$
+$$o_b = \operatorname{align}(0 + 1, 4) = 4$$
+$$o_c = \operatorname{align}(4 + 4, 8) = 8$$
+$$o_d = \operatorname{align}(8 + 8, 8) = 16$$
+與實際布局一致。
+
+若結構體加上 `__attribute__((packed))`，則編譯器會盡量取消成員之間為自然對齊而插入的 padding，此時公式不再需要向上取整。
+因此可修改為：
+$$o_k = o_{k-1} + \text{sizeof}(T_{k-1}) \quad (k \ge 2)$$
+套用到本題後，packed 版本的 offset 會變成 `a = 0`、`b = 1`、`c = 5`、`d = 13`。
 
 ## Reference
 1. IEEE Standards Board, *IEEE Standard for Binary Floating-Point Arithmetic*, ANSI/IEEE Std 754-1985, 1985. Available: [PDF](https://ieeemilestones.ethw.org/File%3AIeee754-1985.pdf)
